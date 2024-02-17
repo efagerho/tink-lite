@@ -7,6 +7,11 @@ An issue with existing ports is that they operate on `Box<dyn Trait>` values tha
 The number one design goal of this library is that all types that the library operates on
 are both `Send` and `Clone` making them easy to use in async servers.
 
-The current version ONLY supports AES-GCM and Ed25519 signatures. This happens to be what
-I personally needed. It's not difficult to add support for missing primitives and PRs are
-welcome.
+WIP and code is still broken.
+
+TODO:
+
+1. Uses fixed IV, so needs to actually sample it.
+1. Doesn't write a valid prefix to the ciphertexts, so they are broken.
+1. Doesn't parse the prefix on decrypt to find the right key.
+1. The TinkError type needs an actual implementation and error handling needs to be properly implemented.

@@ -33,10 +33,10 @@ mod tests {
     #[test]
     fn load_aes_gcm_key() {
         let result = parse_aead_keyset_base64("<key>");
-        
+
         match result {
             Ok(_) => assert!(false),
-            Err(_) => assert!(false, "unable to load AES-GCM key")
+            Err(_) => assert!(false, "unable to load AES-GCM key"),
         }
     }
 }
