@@ -11,7 +11,7 @@ Limitations:
 
 1. Only supports key with Tink or Legacy prefixes.
 1. Only AES-GCM currently supported.
-1. Only supportes key loading operations, i.e. you have to create your keys elsewhere.
+1. Only supports key loading operations, i.e. you have to create your keys elsewhere.
 1. No support for KMS etc.
 1. Only supports loading of plaintext keys.
 
@@ -24,4 +24,3 @@ The library has been designed with the following use-case in mind:
 TODO:
 
 1. The TinkError type needs an actual implementation and error handling needs to be properly implemented.
-1. Tests are missing for AES-GCM-256, so code might be horribly broken

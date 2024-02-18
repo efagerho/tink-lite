@@ -1,9 +1,7 @@
 use std::mem::size_of;
 
 use crate::{
-    aead::Aead,
-    codegen::{key_data::KeyMaterialType, keyset::Key, AesGcmKey, OutputPrefixType},
-    error::TinkError,
+    aead::Aead, algorithms::{LEGACY_KEY_START_BYTE, TINK_KEY_START_BYTE}, codegen::{key_data::KeyMaterialType, keyset::Key, AesGcmKey, OutputPrefixType}, error::TinkError
 };
 use phf::{phf_map, Map};
 
@@ -31,7 +29,6 @@ pub static AEAD_ALGORITHMS: Map<&'static str, fn(&Key) -> Result<AeadKey, TinkEr
 //
 
 pub fn load_aes_gcm_key(key: &Key) -> Result<AeadKey, TinkError> {
-    println!("Got AES-GCM key");
     let key_data = if let Some(data) = &key.key_data {
         data
     } else {
@@ -108,12 +105,14 @@ impl Aead for AeadKeyset {
             return Err(TinkError {  });
         }
 
+        let prefix_byte = ciphertext[0];
+        if !(prefix_byte == LEGACY_KEY_START_BYTE || prefix_byte == TINK_KEY_START_BYTE) {
+            return Err(TinkError {});
+        }
+
         let (key_id, ciphertext) = get_key_id_and_ciphertext(ciphertext);
 
-        println!("Decrypting using key: {}", key_id);
-
         for key in self.keys.iter() {
-            println!("Trying key: {}", key.0);
             if key.0 != key_id {
                 continue;
             }
@@ -142,7 +141,6 @@ const MAX_AES_GCM_PLAINTEXT_SIZE: usize = if size_of::<usize>() == 4 {
 #[derive(Clone)]
 pub struct AesGcm128Key {
     key: aes_gcm::Aes128Gcm,
-    prefix: OutputPrefixType,
     prefix_bytes: [u8; MAX_TINK_AEAD_PREFIX_LENGTH],
 }
 
@@ -154,7 +152,6 @@ impl AesGcm128Key {
 
         AesGcm128Key {
             key: aes_gcm::Aes128Gcm::new_from_slice(key).unwrap(),
-            prefix: prefix,
             prefix_bytes: gen_output_prefix(prefix, key_id),
         }
     }
@@ -189,14 +186,11 @@ impl Aead for AesGcm128Key {
         res.extend_from_slice(&iv);
         res.extend_from_slice(&ciphertext);
 
-        println!("Encrypted plaintext of size {} generating ciphertext of size {} with raw ciphertext {}", plaintext.len(), res.len(), ciphertext.len());
-
         Ok(res)
     }
 
     fn decrypt(&self, ciphertext: &[u8], additional_data: &[u8]) -> Result<Vec<u8>, TinkError> {
         if ciphertext.len() < AES_GCM_IV_SIZE + AES_GCM_TAG_SIZE {
-            println!("Ciphertext is too short: {}", ciphertext.len());
             return Err(TinkError {  });
         }
 
@@ -216,7 +210,6 @@ impl Aead for AesGcm128Key {
 #[derive(Clone)]
 pub struct AesGcm256Key {
     key: aes_gcm::Aes256Gcm,
-    prefix: OutputPrefixType,
     prefix_bytes: [u8; MAX_TINK_AEAD_PREFIX_LENGTH],
 }
 
@@ -228,7 +221,6 @@ impl AesGcm256Key {
 
         AesGcm256Key {
             key: aes_gcm::Aes256Gcm::new_from_slice(key).unwrap(),
-            prefix: prefix,
             prefix_bytes: gen_output_prefix(prefix, key_id),
         }
     }
@@ -246,7 +238,7 @@ impl Aead for AesGcm256Key {
             aad: additional_data,
         };
 
-        let ct = match self.key.encrypt(&iv, payload) {
+        let ciphertext = match self.key.encrypt(&iv, payload) {
             Ok(res) => res,
             Err(_) => return Err(TinkError {}),
         };
@@ -257,16 +249,30 @@ impl Aead for AesGcm256Key {
         // 3. Call the unsafe function set_len to update vectors size to avoid touching the memory.
         // 4. Copy the prefix to the beginning.
         // 5. Encrypt with output written directly to the buffer.
-        let mut res = Vec::with_capacity(PREFIX_SIZE + ct.len());
+        let mut res = Vec::with_capacity(PREFIX_SIZE + iv.len() + ciphertext.len());
 
         res.extend_from_slice(&self.prefix_bytes);
-        res.extend_from_slice(&ct);
+        res.extend_from_slice(&iv);
+        res.extend_from_slice(&ciphertext);
 
         Ok(res)
     }
 
     fn decrypt(&self, ciphertext: &[u8], additional_data: &[u8]) -> Result<Vec<u8>, TinkError> {
-        Err(TinkError {})
+        if ciphertext.len() < AES_GCM_IV_SIZE + AES_GCM_TAG_SIZE {
+            return Err(TinkError {  });
+        }
+
+        let iv = GenericArray::from_slice(&ciphertext[..AES_GCM_IV_SIZE]);
+        let payload = Payload {
+            msg: &ciphertext[AES_GCM_IV_SIZE..],
+            aad: additional_data
+        };
+
+        match self.key.decrypt(iv, payload) {
+            Ok(plaintext) => Ok(plaintext),
+            Err(_) => Err(TinkError {  })
+        }
     }
 }
 
