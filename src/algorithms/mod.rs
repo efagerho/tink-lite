@@ -34,7 +34,7 @@
 
 use crate::{
     aead::Aead,
-    codegen::{KeyStatusType, Keyset},
+    codegen::{KeyStatusType, Keyset, OutputPrefixType},
     error::TinkError,
 };
 
@@ -43,11 +43,53 @@ use prost::Message;
 
 mod aead;
 
+use rand::{thread_rng, Rng};
+
+pub fn get_random_bytes(size: usize) -> Vec<u8> {
+    let mut data = vec![0u8; size];
+    thread_rng().fill(&mut data[..]);
+    data
+}
+
+//
+// Ciphertext prefix handling
+//
+
+pub const PREFIX_SIZE: usize = 5;
+pub const LEGACY_KEY_START_BYTE: u8 = 0;
+pub const TINK_KEY_START_BYTE: u8 = 1;
+
+pub fn gen_output_prefix(prefix: OutputPrefixType, key_id: u32) -> [u8; PREFIX_SIZE] {
+    let start_byte = match prefix {
+        OutputPrefixType::Legacy => LEGACY_KEY_START_BYTE,
+        OutputPrefixType::Tink => TINK_KEY_START_BYTE,
+        _ => panic!("Should never have loaded a key with any other prefix type"),
+    };
+
+    let mut out = [0_u8; PREFIX_SIZE];
+    out[..1].copy_from_slice(&[start_byte]);
+    out[1..].copy_from_slice(&key_id.to_be_bytes());
+    out
+}
+
+pub fn get_key_id_from_prefix(prefix: &[u8]) -> u32 {
+    let bytes: [u8; 4] = prefix[1..5].try_into().unwrap();
+    u32::from_be_bytes(bytes)
+}
+
+pub fn is_supported_prefix(prefix: OutputPrefixType) -> bool {
+    match prefix {
+        OutputPrefixType::Legacy => true,
+        OutputPrefixType::Tink => true,
+        _ => false,
+    }
+}
+
 //
 // AEAD loading
 //
 
-pub fn load_aead_keyset(keyset: &[u8]) -> Result<Box<dyn Aead + Send>, TinkError> {
+pub fn load_aead_keyset(keyset: &[u8]) -> Result<Box<dyn Aead + Send + Sync>, TinkError> {
     let mut keys = vec![];
     let mut ids = vec![];
 
@@ -60,6 +102,10 @@ pub fn load_aead_keyset(keyset: &[u8]) -> Result<Box<dyn Aead + Send>, TinkError
                     || key.status == KeyStatusType::Destroyed as i32
                 {
                     continue;
+                }
+
+                if !is_supported_prefix(key.output_prefix_type()) {
+                    return Err(TinkError {});
                 }
 
                 let keydata = if let Some(k) = &key.key_data {
@@ -98,7 +144,7 @@ pub fn load_aead_keyset(keyset: &[u8]) -> Result<Box<dyn Aead + Send>, TinkError
                 return Err(TinkError {});
             }
 
-            Ok(Box::new(AeadKeyset { keys, ids }))
+            Ok(Box::new(AeadKeyset::new(keys, ids)))
         }
         Err(_) => Err(TinkError {}),
     }

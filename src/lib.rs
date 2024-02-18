@@ -15,11 +15,11 @@ mod codegen;
 // Parsers for different key types
 //
 
-pub fn parse_aead_keyset(keyset: &[u8]) -> Result<Box<dyn Aead + Send>, TinkError> {
+pub fn parse_aead_keyset(keyset: &[u8]) -> Result<Box<dyn Aead + Send + Sync>, TinkError> {
     load_aead_keyset(keyset)
 }
 
-pub fn parse_aead_keyset_base64(key: &str) -> Result<Box<dyn Aead + Send>, TinkError> {
+pub fn parse_aead_keyset_base64(key: &str) -> Result<Box<dyn Aead + Send + Sync>, TinkError> {
     match STANDARD.decode(key) {
         Ok(data) => parse_aead_keyset(&data),
         Err(_) => Err(TinkError {}),

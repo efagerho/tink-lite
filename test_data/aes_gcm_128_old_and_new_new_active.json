@@ -1,0 +1,25 @@
+{
+  "primaryKeyId": 4282066938,
+  "key": [
+    {
+      "keyData": {
+        "typeUrl": "type.googleapis.com/google.crypto.tink.AesGcmKey",
+        "value": "GhD1cBCdnD4K+Yg9UqoYRn47",
+        "keyMaterialType": "SYMMETRIC"
+      },
+      "status": "ENABLED",
+      "keyId": 2087243554,
+      "outputPrefixType": "TINK"
+    },
+    {
+      "keyData": {
+        "typeUrl": "type.googleapis.com/google.crypto.tink.AesGcmKey",
+        "value": "GhCjPUVCLdKWqyXkabm1i0cz",
+        "keyMaterialType": "SYMMETRIC"
+      },
+      "status": "ENABLED",
+      "keyId": 4282066938,
+      "outputPrefixType": "TINK"
+    }
+  ]
+}

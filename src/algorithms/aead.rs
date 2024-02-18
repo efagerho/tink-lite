@@ -1,3 +1,5 @@
+use std::mem::size_of;
+
 use crate::{
     aead::Aead,
     codegen::{key_data::KeyMaterialType, keyset::Key, AesGcmKey, OutputPrefixType},
@@ -12,15 +14,13 @@ use aes_gcm::{
 };
 use prost::Message;
 
+use super::{gen_output_prefix, get_key_id_from_prefix, get_random_bytes, PREFIX_SIZE};
+
 //
 // Constants
 //
 
 const MAX_TINK_AEAD_PREFIX_LENGTH: usize = 5;
-
-const AES_GCM_IV_SIZE: usize = 12;
-const AES_GCM_TAG_SIZE: usize = 16;
-const MAX_AES_GCM_PLAINTEXT_SIZE: u64 = (1 << 36) - 32;
 
 pub static AEAD_ALGORITHMS: Map<&'static str, fn(&Key) -> Result<AeadKey, TinkError>> = phf_map! {
    "type.googleapis.com/google.crypto.tink.AesGcmKey" => load_aes_gcm_key
@@ -32,7 +32,7 @@ pub static AEAD_ALGORITHMS: Map<&'static str, fn(&Key) -> Result<AeadKey, TinkEr
 
 pub fn load_aes_gcm_key(key: &Key) -> Result<AeadKey, TinkError> {
     println!("Got AES-GCM key");
-    let key_data = if let Some(data) = key.key_data {
+    let key_data = if let Some(data) = &key.key_data {
         data
     } else {
         return Err(TinkError {});
@@ -43,8 +43,8 @@ pub fn load_aes_gcm_key(key: &Key) -> Result<AeadKey, TinkError> {
     }
 
     // Parse the actual AES key
-    let acm_gcm_proto_bytes = key_data.value;
-    let aes_gcm_key = match AesGcmKey::decode(acm_gcm_proto_bytes.as_slice()) {
+    let acm_gcm_proto_bytes = key_data.value.as_slice();
+    let aes_gcm_key = match AesGcmKey::decode(acm_gcm_proto_bytes) {
         Ok(key) => key,
         Err(_) => return Err(TinkError {}),
     };
@@ -69,6 +69,7 @@ pub fn load_aes_gcm_key(key: &Key) -> Result<AeadKey, TinkError> {
             prefix,
             key_id,
         ))),
+        _ => Err(TinkError {}),
     }
 }
 
@@ -84,14 +85,23 @@ pub enum AeadKey {
 
 #[derive(Clone)]
 pub struct AeadKeyset {
-    pub keys: Vec<AeadKey>,
+    keys: Vec<AeadKey>,
     // We store at index i the ID for keys[i].
     // This is more memory efficient than a hashmap and presumably the number of keys will be small enough
     // that a consecutive scan through a buffer is faster than a hash table lookup.
-    pub ids: Vec<u32>,
+    ids: Vec<u32>,
+}
+
+impl AeadKeyset {
+    pub fn new(keys: Vec<AeadKey>, ids: Vec<u32>) -> Self {
+        AeadKeyset {
+            keys, ids
+        }
+    }
 }
 
 impl Aead for AeadKeyset {
+
     fn encrypt(&self, plaintext: &[u8], additional_data: &[u8]) -> Result<Vec<u8>, TinkError> {
         // The first key is always the active one.
         match &self.keys[0] {
@@ -101,11 +111,18 @@ impl Aead for AeadKeyset {
     }
 
     fn decypt(&self, ciphertext: &[u8], additional_data: &[u8]) -> Result<Vec<u8>, TinkError> {
-        // TODO: Parse header to figure out right key version
-        match &self.keys[0] {
-            AeadKey::AesGcm128(key) => key.decypt(ciphertext, additional_data),
-            AeadKey::AesGcm256(key) => key.decypt(ciphertext, additional_data),
+        let key_id = get_key_id_from_prefix(ciphertext);
+
+        for (i, key) in self.keys.iter().enumerate() {
+            if self.ids[i] != key_id {
+                continue;
+            }
+            return match key {
+                AeadKey::AesGcm128(key) => key.decypt(ciphertext, additional_data),
+                AeadKey::AesGcm256(key) => key.decypt(ciphertext, additional_data),
+            };
         }
+        Err(TinkError {})
     }
 }
 
@@ -113,10 +130,18 @@ impl Aead for AeadKeyset {
 // AES-GCM
 //
 
+const AES_GCM_IV_SIZE: usize = 12;
+const AES_GCM_TAG_SIZE: usize = 16;
+
+const MAX_AES_GCM_PLAINTEXT_SIZE: usize = if size_of::<usize>() == 4 {
+    (isize::MAX - 1) as usize - AES_GCM_IV_SIZE - AES_GCM_TAG_SIZE
+} else {
+    (1 << 36) - 32
+};
+
 #[derive(Clone)]
 pub struct AesGcm128Key {
     key: aes_gcm::Aes128Gcm,
-    key_id: u32,
     prefix: OutputPrefixType,
     prefix_bytes: [u8; MAX_TINK_AEAD_PREFIX_LENGTH],
 }
@@ -127,19 +152,20 @@ impl AesGcm128Key {
             panic!("Invalid key length in AES-GCM-128 key")
         }
 
-        // TODO: Calculate the prefix bytes
-
         AesGcm128Key {
             key: aes_gcm::Aes128Gcm::new_from_slice(key).unwrap(),
-            key_id: key_id,
             prefix: prefix,
-            prefix_bytes: [0; MAX_TINK_AEAD_PREFIX_LENGTH],
+            prefix_bytes: gen_output_prefix(prefix, key_id),
         }
     }
 }
 
 impl Aead for AesGcm128Key {
     fn encrypt(&self, plaintext: &[u8], additional_data: &[u8]) -> Result<Vec<u8>, TinkError> {
+        if plaintext.len() > MAX_AES_GCM_PLAINTEXT_SIZE {
+            return Err(TinkError {});
+        }
+
         let iv = aes_gcm_iv();
         let payload = Payload {
             msg: plaintext,
@@ -157,10 +183,9 @@ impl Aead for AesGcm128Key {
         // 3. Call the unsafe function set_len to update vectors size to avoid touching the memory.
         // 4. Copy the prefix to the beginning.
         // 5. Encrypt with output written directly to the buffer.
-        let mut res = Vec::with_capacity(get_prefix_length(self.prefix) + ct.len());
+        let mut res = Vec::with_capacity(PREFIX_SIZE + ct.len());
 
-        let prefix_length = get_prefix_length(self.prefix);
-        res.extend_from_slice(&self.prefix_bytes[0..prefix_length]);
+        res.extend_from_slice(&self.prefix_bytes);
         res.extend_from_slice(&ct);
 
         Ok(res)
@@ -174,7 +199,6 @@ impl Aead for AesGcm128Key {
 #[derive(Clone)]
 pub struct AesGcm256Key {
     key: aes_gcm::Aes256Gcm,
-    key_id: u32,
     prefix: OutputPrefixType,
     prefix_bytes: [u8; MAX_TINK_AEAD_PREFIX_LENGTH],
 }
@@ -185,19 +209,20 @@ impl AesGcm256Key {
             panic!("Invalid key length in AES-GCM-256 key")
         }
 
-        // TODO: Calculate the prefix bytes
-
         AesGcm256Key {
             key: aes_gcm::Aes256Gcm::new_from_slice(key).unwrap(),
-            key_id: key_id,
             prefix: prefix,
-            prefix_bytes: [0; MAX_TINK_AEAD_PREFIX_LENGTH],
+            prefix_bytes: gen_output_prefix(prefix, key_id),
         }
     }
 }
 
 impl Aead for AesGcm256Key {
     fn encrypt(&self, plaintext: &[u8], additional_data: &[u8]) -> Result<Vec<u8>, TinkError> {
+        if plaintext.len() > MAX_AES_GCM_PLAINTEXT_SIZE {
+            return Err(TinkError {});
+        }
+
         let iv = aes_gcm_iv();
         let payload = Payload {
             msg: plaintext,
@@ -215,10 +240,9 @@ impl Aead for AesGcm256Key {
         // 3. Call the unsafe function set_len to update vectors size to avoid touching the memory.
         // 4. Copy the prefix to the beginning.
         // 5. Encrypt with output written directly to the buffer.
-        let mut res = Vec::with_capacity(get_prefix_length(self.prefix) + ct.len());
+        let mut res = Vec::with_capacity(PREFIX_SIZE + ct.len());
 
-        let prefix_length = get_prefix_length(self.prefix);
-        res.extend_from_slice(&self.prefix_bytes[0..prefix_length]);
+        res.extend_from_slice(&self.prefix_bytes);
         res.extend_from_slice(&ct);
 
         Ok(res)
@@ -231,18 +255,6 @@ impl Aead for AesGcm256Key {
 
 fn aes_gcm_iv() -> GenericArray<u8, U12> {
     // TODO: INSECURE FIX
-    let iv = [0; AES_GCM_IV_SIZE];
+    let iv = get_random_bytes(AES_GCM_IV_SIZE);
     *GenericArray::<u8, U12>::from_slice(&iv)
-}
-
-fn get_prefix_length(prefix: OutputPrefixType) -> usize {
-    match prefix {
-        OutputPrefixType::Raw => 0,
-        OutputPrefixType::UnknownPrefix => {
-            panic!("Logic error, should not happen");
-        }
-        OutputPrefixType::Crunchy => 5,
-        OutputPrefixType::Legacy => 5,
-        OutputPrefixType::Tink => 5,
-    }
 }
