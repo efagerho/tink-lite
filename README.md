@@ -24,5 +24,4 @@ The library has been designed with the following use-case in mind:
 TODO:
 
 1. The TinkError type needs an actual implementation and error handling needs to be properly implemented.
-1. Decrypt operations are not implemented
-1. Tests are missing, so code might be horribly broken
+1. Tests are missing for AES-GCM-256, so code might be horribly broken

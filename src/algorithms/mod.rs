@@ -72,9 +72,9 @@ pub fn gen_output_prefix(prefix: OutputPrefixType, key_id: u32) -> [u8; PREFIX_S
     out
 }
 
-pub fn get_key_id_from_prefix(prefix: &[u8]) -> u32 {
-    let bytes: [u8; 4] = prefix[1..5].try_into().unwrap();
-    u32::from_be_bytes(bytes)
+pub fn get_key_id_and_ciphertext(ciphertext: &[u8]) -> (u32, &[u8]) {
+    let bytes: [u8; 4] = ciphertext[1..5].try_into().unwrap();
+    (u32::from_be_bytes(bytes), &ciphertext[5..])
 }
 
 pub fn is_supported_prefix(prefix: OutputPrefixType) -> bool {
@@ -91,7 +91,6 @@ pub fn is_supported_prefix(prefix: OutputPrefixType) -> bool {
 
 pub fn load_aead_keyset(keyset: &[u8]) -> Result<Box<dyn Aead + Send + Sync>, TinkError> {
     let mut keys = vec![];
-    let mut ids = vec![];
 
     match Keyset::decode(keyset) {
         Ok(keyset) => {
@@ -127,11 +126,9 @@ pub fn load_aead_keyset(keyset: &[u8]) -> Result<Box<dyn Aead + Send + Sync>, Ti
                             Ok(key) => {
                                 // The active key should always be first
                                 if active {
-                                    keys.insert(0, key);
-                                    ids.insert(0, id);
+                                    keys.insert(0, (id, key));
                                 } else {
-                                    keys.push(key);
-                                    ids.push(id);
+                                    keys.push((id, key));
                                 }
                             }
                             Err(_) => return Err(TinkError {}),
@@ -144,7 +141,7 @@ pub fn load_aead_keyset(keyset: &[u8]) -> Result<Box<dyn Aead + Send + Sync>, Ti
                 return Err(TinkError {});
             }
 
-            Ok(Box::new(AeadKeyset::new(keys, ids)))
+            Ok(Box::new(AeadKeyset::new(keys)))
         }
         Err(_) => Err(TinkError {}),
     }

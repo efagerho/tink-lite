@@ -14,7 +14,7 @@ use aes_gcm::{
 };
 use prost::Message;
 
-use super::{gen_output_prefix, get_key_id_from_prefix, get_random_bytes, PREFIX_SIZE};
+use super::{gen_output_prefix, get_key_id_and_ciphertext, get_random_bytes, PREFIX_SIZE};
 
 //
 // Constants
@@ -85,41 +85,41 @@ pub enum AeadKey {
 
 #[derive(Clone)]
 pub struct AeadKeyset {
-    keys: Vec<AeadKey>,
-    // We store at index i the ID for keys[i].
-    // This is more memory efficient than a hashmap and presumably the number of keys will be small enough
-    // that a consecutive scan through a buffer is faster than a hash table lookup.
-    ids: Vec<u32>,
+    keys: Vec<(u32, AeadKey)>,
 }
 
 impl AeadKeyset {
-    pub fn new(keys: Vec<AeadKey>, ids: Vec<u32>) -> Self {
-        AeadKeyset {
-            keys, ids
-        }
+    pub fn new(keys: Vec<(u32, AeadKey)>) -> Self {
+        AeadKeyset { keys }
     }
 }
 
 impl Aead for AeadKeyset {
-
     fn encrypt(&self, plaintext: &[u8], additional_data: &[u8]) -> Result<Vec<u8>, TinkError> {
         // The first key is always the active one.
-        match &self.keys[0] {
+        match &self.keys[0].1 {
             AeadKey::AesGcm128(key) => key.encrypt(plaintext, additional_data),
             AeadKey::AesGcm256(key) => key.encrypt(plaintext, additional_data),
         }
     }
 
-    fn decypt(&self, ciphertext: &[u8], additional_data: &[u8]) -> Result<Vec<u8>, TinkError> {
-        let key_id = get_key_id_from_prefix(ciphertext);
+    fn decrypt(&self, ciphertext: &[u8], additional_data: &[u8]) -> Result<Vec<u8>, TinkError> {
+        if ciphertext.len() < 5 {
+            return Err(TinkError {  });
+        }
 
-        for (i, key) in self.keys.iter().enumerate() {
-            if self.ids[i] != key_id {
+        let (key_id, ciphertext) = get_key_id_and_ciphertext(ciphertext);
+
+        println!("Decrypting using key: {}", key_id);
+
+        for key in self.keys.iter() {
+            println!("Trying key: {}", key.0);
+            if key.0 != key_id {
                 continue;
             }
-            return match key {
-                AeadKey::AesGcm128(key) => key.decypt(ciphertext, additional_data),
-                AeadKey::AesGcm256(key) => key.decypt(ciphertext, additional_data),
+            return match &key.1 {
+                AeadKey::AesGcm128(key) => key.decrypt(ciphertext, additional_data),
+                AeadKey::AesGcm256(key) => key.decrypt(ciphertext, additional_data),
             };
         }
         Err(TinkError {})
@@ -172,7 +172,7 @@ impl Aead for AesGcm128Key {
             aad: additional_data,
         };
 
-        let ct = match self.key.encrypt(&iv, payload) {
+        let ciphertext = match self.key.encrypt(&iv, payload) {
             Ok(res) => res,
             Err(_) => return Err(TinkError {}),
         };
@@ -183,16 +183,33 @@ impl Aead for AesGcm128Key {
         // 3. Call the unsafe function set_len to update vectors size to avoid touching the memory.
         // 4. Copy the prefix to the beginning.
         // 5. Encrypt with output written directly to the buffer.
-        let mut res = Vec::with_capacity(PREFIX_SIZE + ct.len());
+        let mut res = Vec::with_capacity(PREFIX_SIZE + iv.len() + ciphertext.len());
 
         res.extend_from_slice(&self.prefix_bytes);
-        res.extend_from_slice(&ct);
+        res.extend_from_slice(&iv);
+        res.extend_from_slice(&ciphertext);
+
+        println!("Encrypted plaintext of size {} generating ciphertext of size {} with raw ciphertext {}", plaintext.len(), res.len(), ciphertext.len());
 
         Ok(res)
     }
 
-    fn decypt(&self, ciphertext: &[u8], additional_data: &[u8]) -> Result<Vec<u8>, TinkError> {
-        Err(TinkError {})
+    fn decrypt(&self, ciphertext: &[u8], additional_data: &[u8]) -> Result<Vec<u8>, TinkError> {
+        if ciphertext.len() < AES_GCM_IV_SIZE + AES_GCM_TAG_SIZE {
+            println!("Ciphertext is too short: {}", ciphertext.len());
+            return Err(TinkError {  });
+        }
+
+        let iv = GenericArray::from_slice(&ciphertext[..AES_GCM_IV_SIZE]);
+        let payload = Payload {
+            msg: &ciphertext[AES_GCM_IV_SIZE..],
+            aad: additional_data
+        };
+
+        match self.key.decrypt(iv, payload) {
+            Ok(plaintext) => Ok(plaintext),
+            Err(_) => Err(TinkError {  })
+        }
     }
 }
 
@@ -248,13 +265,12 @@ impl Aead for AesGcm256Key {
         Ok(res)
     }
 
-    fn decypt(&self, ciphertext: &[u8], additional_data: &[u8]) -> Result<Vec<u8>, TinkError> {
+    fn decrypt(&self, ciphertext: &[u8], additional_data: &[u8]) -> Result<Vec<u8>, TinkError> {
         Err(TinkError {})
     }
 }
 
 fn aes_gcm_iv() -> GenericArray<u8, U12> {
-    // TODO: INSECURE FIX
     let iv = get_random_bytes(AES_GCM_IV_SIZE);
     *GenericArray::<u8, U12>::from_slice(&iv)
 }
